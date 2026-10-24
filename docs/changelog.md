@@ -170,6 +170,10 @@ As features stabilize some brief notes about them will accumulate here.
 * Multiplexer: writing to a remote pane (eg: `pane:send_text()` from Lua, or a
   paste) blocked the GUI until the server replied, freezing the window for
   seconds while the server was busy.
+* Window title and tab bar were rebuilt, and the OS window title set, for every
+  pane title, cwd, progress, focus or resize change in any pane, even when
+  nothing visible changed. Such updates are now coalesced and unchanged
+  window titles are not re-applied.
 * Multiplexer: the mouse wheel was not mapped to cursor up/down keys in the
   alternate screen for panes in a `wezterm connect` domain, because the client
   always reported the alternate screen as inactive. The server now advises the

@@ -436,6 +436,12 @@ pub struct TermWindow {
     line_quad_cache: RefCell<LfuCache<LineQuadCacheKey, LineQuadCacheValue>>,
 
     last_status_call: Instant,
+    /// A coalesced title update is already queued; see schedule_update_title
+    title_update_scheduled: bool,
+    /// The queued coalesced title update should also emit the update-status event
+    title_update_wants_status: bool,
+    /// The title most recently passed to the OS window, to skip no-op updates
+    last_window_title: Option<String>,
     cursor_blink_state: RefCell<ColorEase>,
     blink_state: RefCell<ColorEase>,
     rapid_blink_state: RefCell<ColorEase>,
@@ -759,6 +765,9 @@ impl TermWindow {
                 &config,
             )),
             last_status_call: Instant::now(),
+            title_update_scheduled: false,
+            title_update_wants_status: false,
+            last_window_title: None,
             cursor_blink_state: RefCell::new(ColorEase::new(
                 config.cursor_blink_rate,
                 config.cursor_blink_ease_in,
@@ -1217,7 +1226,7 @@ impl TermWindow {
                         | Alert::Progress(_),
                     ..
                 } => {
-                    self.update_title();
+                    self.schedule_update_title(true);
                 }
                 MuxNotification::Alert {
                     alert: Alert::PaletteChanged,
@@ -1291,7 +1300,7 @@ impl TermWindow {
                 }
                 MuxNotification::WindowInvalidated(_) => {
                     window.invalidate();
-                    self.update_title_post_status();
+                    self.schedule_update_title(false);
                 }
                 MuxNotification::WindowRemoved(_window_id) => {
                     // Handled by frontend
@@ -1304,14 +1313,14 @@ impl TermWindow {
                 }
                 MuxNotification::PaneFocused(_) => {
                     // Also handled by clientpane
-                    self.update_title_post_status();
+                    self.schedule_update_title(false);
                 }
                 MuxNotification::TabResized(_) => {
                     // Also handled by wezterm-client
-                    self.update_title_post_status();
+                    self.schedule_update_title(false);
                 }
                 MuxNotification::TabTitleChanged { .. } => {
-                    self.update_title_post_status();
+                    self.schedule_update_title(false);
                 }
                 MuxNotification::PaneAdded(_)
                 | MuxNotification::WorkspaceRenamed { .. }
@@ -1899,6 +1908,40 @@ impl TermWindow {
         self.update_title_impl();
     }
 
+    /// Coalesce title updates triggered by mux notifications.
+    /// Every pane title/cwd/progress change, focus change and resize in
+    /// any pane of the window used to rebuild the tab bar and set the OS
+    /// window title synchronously. When panes change faster than that
+    /// work completes (eg: many shells starting at once over a mux
+    /// connection on Windows, where SetWindowTextW also repaints the
+    /// non-client area) the notification backlog grows without bound:
+    /// the GUI stops responding, memory climbs, and the title visibly
+    /// replays stale values. Instead, queue at most one update; when it
+    /// runs it reflects the latest state.
+    fn schedule_update_title(&mut self, with_status: bool) {
+        self.title_update_wants_status |= with_status;
+        if self.title_update_scheduled {
+            return;
+        }
+        let Some(window) = self.window.as_ref() else {
+            if std::mem::take(&mut self.title_update_wants_status) {
+                self.update_title();
+            } else {
+                self.update_title_post_status();
+            }
+            return;
+        };
+        self.title_update_scheduled = true;
+        window.notify(TermWindowNotif::Apply(Box::new(|term_window| {
+            term_window.title_update_scheduled = false;
+            if std::mem::take(&mut term_window.title_update_wants_status) {
+                term_window.update_title();
+            } else {
+                term_window.update_title_post_status();
+            }
+        })));
+    }
+
     fn window_contains_pane(&mut self, pane_id: PaneId) -> bool {
         let mux = Mux::get();
 
@@ -2073,7 +2116,12 @@ impl TermWindow {
         };
 
         if let Some(window) = self.window.as_ref() {
-            window.set_title(&title);
+            // Setting the OS window title is not free (on Windows it
+            // repaints the title bar), and most updates leave it unchanged.
+            if self.last_window_title.as_deref() != Some(title.as_str()) {
+                window.set_title(&title);
+                self.last_window_title = Some(title);
+            }
 
             let show_tab_bar = if tabs_count == 1 {
                 self.config.enable_tab_bar && !self.config.hide_tab_bar_if_only_one_tab
