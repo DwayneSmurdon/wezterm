@@ -914,12 +914,26 @@ impl Domain for ClientDomain {
             .downcast_ref::<ClientPane>()
             .ok_or_else(|| anyhow!("pane_id {} is not a ClientPane", pane_id))?;
 
+        // A pane being moved here is identified by its LOCAL id, but the
+        // server knows it by its remote id; and we already have a local
+        // ClientPane for it, which must be reused rather than duplicated.
+        let mut moving: Option<Arc<dyn Pane>> = None;
         let (command, command_dir, move_pane_id) = match source {
             SplitSource::Spawn {
                 command,
                 command_dir,
             } => (command, command_dir, None),
-            SplitSource::MovePane(move_pane_id) => (None, None, Some(move_pane_id)),
+            SplitSource::MovePane(local_move_pane_id) => {
+                let moved = mux
+                    .get_pane(local_move_pane_id)
+                    .ok_or_else(|| anyhow!("pane_id {} is invalid", local_move_pane_id))?;
+                let remote_move_pane_id = moved
+                    .downcast_ref::<ClientPane>()
+                    .ok_or_else(|| anyhow!("pane_id {} is not a ClientPane", local_move_pane_id))?
+                    .remote_pane_id;
+                moving.replace(moved);
+                (None, None, Some(remote_move_pane_id))
+            }
         };
 
         let result = inner
@@ -934,13 +948,32 @@ impl Domain for ClientDomain {
             })
             .await?;
 
-        let pane: Arc<dyn Pane> = Arc::new(ClientPane::new(
-            &inner,
-            result.tab_id,
-            result.pane_id,
-            result.size,
-            "wezterm",
-        ));
+        let is_move = moving.is_some();
+        let pane: Arc<dyn Pane> = match moving {
+            Some(moved) => {
+                // Mirror the server: take the pane out of its current local
+                // tab (closing that tab if it is now empty) and re-home it.
+                if let Some((_domain, _window, src_tab_id)) = mux.resolve_pane_id(moved.pane_id()) {
+                    if let Some(src_tab) = mux.get_tab(src_tab_id) {
+                        src_tab.remove_pane(moved.pane_id());
+                        if src_tab.is_dead() {
+                            mux.remove_tab(src_tab_id);
+                        }
+                    }
+                }
+                if let Some(client_pane) = moved.downcast_ref::<ClientPane>() {
+                    client_pane.set_remote_tab_id(result.tab_id);
+                }
+                moved
+            }
+            None => Arc::new(ClientPane::new(
+                &inner,
+                result.tab_id,
+                result.pane_id,
+                result.size,
+                "wezterm",
+            )),
+        };
 
         let pane_index = match tab
             .iter_panes()
@@ -954,7 +987,9 @@ impl Domain for ClientDomain {
         tab.split_and_insert(pane_index, split_request, Arc::clone(&pane))
             .ok();
 
-        mux.add_pane(&pane)?;
+        if !is_move {
+            mux.add_pane(&pane)?;
+        }
 
         Ok(pane)
     }

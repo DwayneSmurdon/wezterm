@@ -20,6 +20,7 @@ use ratelim::RateLimiter;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use termwiz::input::KeyEvent;
 use termwiz::surface::SequenceNo;
@@ -35,7 +36,9 @@ pub struct ClientPane {
     client: Arc<ClientInner>,
     local_pane_id: PaneId,
     pub remote_pane_id: PaneId,
-    pub remote_tab_id: TabId,
+    /// The remote tab containing this pane; changes when the pane is moved
+    /// to another tab (see set_remote_tab_id)
+    remote_tab_id: AtomicUsize,
     pub renderable: Mutex<RenderableState>,
     configured_palette: Mutex<ColorPalette>,
     palette: Mutex<ColorPalette>,
@@ -119,7 +122,7 @@ impl ClientPane {
             mouse,
             remote_pane_id,
             local_pane_id,
-            remote_tab_id,
+            remote_tab_id: AtomicUsize::new(remote_tab_id),
             application_palette: Mutex::new(false),
             renderable: Mutex::new(render),
             writer: Mutex::new(writer),
@@ -254,6 +257,16 @@ impl ClientPane {
         self.remote_pane_id
     }
 
+    pub fn remote_tab_id(&self) -> TabId {
+        self.remote_tab_id.load(Ordering::Relaxed)
+    }
+
+    /// Record that the pane now lives in another remote tab, eg: after it
+    /// was moved into a split there; resize and zoom requests name it.
+    pub fn set_remote_tab_id(&self, remote_tab_id: TabId) {
+        self.remote_tab_id.store(remote_tab_id, Ordering::Relaxed);
+    }
+
     /// Arrange to suppress the next Pane::kill call.
     /// This is a bit of a hack that we use when closing a window;
     /// our Domain::local_window_is_closing impl calls this for each
@@ -383,7 +396,7 @@ impl Pane for ClientPane {
         let mut inner = render.inner.borrow_mut();
         let client = Arc::clone(&self.client);
         let remote_pane_id = self.remote_pane_id;
-        let remote_tab_id = self.remote_tab_id;
+        let remote_tab_id = self.remote_tab_id();
         // Invalidate any cached rows on a resize
         inner.make_all_stale();
         promise::spawn::spawn(async move {
@@ -422,7 +435,7 @@ impl Pane for ClientPane {
 
             let client = Arc::clone(&self.client);
             let remote_pane_id = self.remote_pane_id;
-            let remote_tab_id = self.remote_tab_id;
+            let remote_tab_id = self.remote_tab_id();
             promise::spawn::spawn(async move {
                 client
                     .client
