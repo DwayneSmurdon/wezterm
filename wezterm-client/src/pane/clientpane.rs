@@ -661,12 +661,26 @@ struct PaneWriter {
 
 impl std::io::Write for PaneWriter {
     fn write(&mut self, data: &[u8]) -> Result<usize, std::io::Error> {
-        promise::spawn::block_on(self.client.client.write_to_pane(WriteToPane {
-            pane_id: self.remote_pane_id,
-            data: data.to_vec(),
-        }))
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e)))?;
-        Ok(data.len())
+        // Don't block the caller (usually the GUI thread, eg: pane:send_text()
+        // from Lua or a paste) on the server's reply: while the server is
+        // busy, eg: spawning a batch of shells, that froze the whole window
+        // for seconds. Writes are queued in order on the main thread, so
+        // their relative order is preserved.
+        let client = Arc::clone(&self.client);
+        let pane_id = self.remote_pane_id;
+        let data = data.to_vec();
+        let len = data.len();
+        promise::spawn::spawn_into_main_thread(async move {
+            if let Err(err) = client
+                .client
+                .write_to_pane(WriteToPane { pane_id, data })
+                .await
+            {
+                log::error!("write to remote pane {pane_id} failed: {err:#}");
+            }
+        })
+        .detach();
+        Ok(len)
     }
 
     fn flush(&mut self) -> Result<(), std::io::Error> {
