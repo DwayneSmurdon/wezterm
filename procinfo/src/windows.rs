@@ -41,11 +41,32 @@ impl Snapshot {
         }
     }
 
+    /// The system process list, shared for a short time.
+    /// A Toolhelp32 snapshot of every process on the system is expensive
+    /// (NtQuerySystemInformation), and the mux asks for one per pane
+    /// whenever it needs a pane's foreground process or cwd (eg: on every
+    /// output push to a client). With many busy panes that was dozens of
+    /// full snapshots per second on the mux main thread, pegging a core and
+    /// delaying input and output for every pane. Share one snapshot across
+    /// panes for a short window instead.
     pub fn entries() -> Vec<PROCESSENTRY32W> {
-        match Self::new() {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        const SHARED_SNAPSHOT_TTL: Duration = Duration::from_millis(1000);
+        static SHARED: Mutex<Option<(Instant, Vec<PROCESSENTRY32W>)>> = Mutex::new(None);
+
+        let mut shared = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((taken, entries)) = shared.as_ref() {
+            if taken.elapsed() < SHARED_SNAPSHOT_TTL {
+                return entries.clone();
+            }
+        }
+        let entries: Vec<PROCESSENTRY32W> = match Self::new() {
             Some(snapshot) => snapshot.iter().collect(),
             None => vec![],
-        }
+        };
+        shared.replace((Instant::now(), entries.clone()));
+        entries
     }
 }
 

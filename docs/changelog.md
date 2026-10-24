@@ -160,6 +160,10 @@ As features stabilize some brief notes about them will accumulate here.
   `CTRL-u` to kill back to the start of the line. Thanks to @bew! #8013
 
 #### Fixed
+* Windows: the multiplexer server took a snapshot of every process on the system
+  per pane, on every pane output push, pegging a core and delaying input and
+  output for all panes when many panes were busy. The snapshot is now shared
+  briefly across panes.
 * Multiplexer: the mouse wheel was not mapped to cursor up/down keys in the
   alternate screen for panes in a `wezterm connect` domain, because the client
   always reported the alternate screen as inactive. The server now advises the
