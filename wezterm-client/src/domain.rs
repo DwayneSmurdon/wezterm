@@ -13,9 +13,35 @@ use mux::window::WindowId;
 use mux::{Mux, MuxNotification};
 use portable_pty::CommandBuilder;
 use promise::spawn::spawn_into_new_thread;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use wezterm_term::TerminalSize;
+
+thread_local! {
+    /// Set while applying a tab/window title that came from the server.
+    static APPLYING_REMOTE_TITLE: Cell<bool> = Cell::new(false);
+}
+
+/// Apply a title that the server told us about. Setting it locally emits
+/// TabTitleChanged/WindowTitleChanged, which mux_notify_client_domain would
+/// otherwise send straight back to the server as though the user had
+/// changed it. That echo is harmful when the value is stale: a ListPanes
+/// response generated before the server processed our own set_tab_title
+/// carries the old (often empty) title, and echoing it back permanently
+/// overwrites the title we just set. Mux::notify runs subscribers
+/// synchronously, so a thread-local flag covers the whole call.
+fn apply_remote_title(f: impl FnOnce()) {
+    APPLYING_REMOTE_TITLE.with(|flag| {
+        let prior = flag.replace(true);
+        f();
+        flag.set(prior);
+    });
+}
+
+fn applying_remote_title() -> bool {
+    APPLYING_REMOTE_TITLE.with(|flag| flag.get())
+}
 
 pub struct ClientInner {
     pub client: Client,
@@ -338,6 +364,11 @@ fn mux_notify_client_domain(local_domain_id: DomainId, notif: MuxNotification) -
             })
             .detach();
         }
+        MuxNotification::TabTitleChanged { .. } | MuxNotification::WindowTitleChanged { .. }
+            if applying_remote_title() =>
+        {
+            // The server is the source of this title; don't echo it back
+        }
         MuxNotification::TabTitleChanged { tab_id, title } => {
             if let Some(remote_tab_id) = client_domain.local_to_remote_tab_id(tab_id) {
                 if let Some(inner) = client_domain.inner() {
@@ -485,7 +516,7 @@ impl ClientDomain {
         if let Some(inner) = self.inner() {
             if let Some(local_window_id) = inner.remote_to_local_window(remote_window_id) {
                 if let Some(mut window) = Mux::get().get_window_mut(local_window_id) {
-                    window.set_title(&title);
+                    apply_remote_title(|| window.set_title(&title));
                 }
             }
         }
@@ -495,7 +526,7 @@ impl ClientDomain {
         if let Some(inner) = self.inner() {
             if let Some(local_tab_id) = inner.remote_to_local_tab_id(remote_tab_id) {
                 if let Some(tab) = Mux::get().get_tab(local_tab_id) {
-                    tab.set_title(&title);
+                    apply_remote_title(|| tab.set_title(&title));
                 }
             }
         }
@@ -573,7 +604,7 @@ impl ClientDomain {
                     inner.record_remote_to_local_tab_mapping(remote_tab_id, tab.tab_id());
                 }
 
-                tab.set_title(tab_title);
+                apply_remote_title(|| tab.set_title(tab_title));
 
                 log::debug!("domain: {} tree: {:#?}", inner.local_domain_id, tabroot);
                 let mut workspace = None;
@@ -674,7 +705,7 @@ impl ClientDomain {
                 let mut window = mux
                     .get_window_mut(local_window_id)
                     .expect("no such window!?");
-                window.set_title(&window_title);
+                apply_remote_title(|| window.set_title(&window_title));
             }
         }
 
