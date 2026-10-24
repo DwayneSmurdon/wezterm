@@ -13,7 +13,11 @@ use promise::{Future, Promise};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+/// Incremented for every PaneFocused notification; see the handler below.
+static PANE_FOCUSED_SEQ: AtomicUsize = AtomicUsize::new(0);
 use wezterm_term::{Alert, ClipboardSelection};
 use wezterm_toast_notification::*;
 
@@ -78,7 +82,19 @@ impl GuiFrontEnd {
                     .detach();
                 }
                 MuxNotification::PaneFocused(pane_id) => {
+                    // The reconcile below runs later, and applying a focus
+                    // change itself emits PaneFocused. If focus changes twice
+                    // in quick succession (A then B), the deferred handler
+                    // for A would re-focus A after B, emitting PaneFocused(A),
+                    // whose handler runs after B's re-focus of B, and so on:
+                    // the two events chase each other forever, rebuilding the
+                    // tab bar and window title each time until the GUI stops
+                    // responding. Only apply the most recent focus event.
+                    let seq = PANE_FOCUSED_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
                     promise::spawn::spawn_into_main_thread(async move {
+                        if PANE_FOCUSED_SEQ.load(Ordering::SeqCst) != seq {
+                            return;
+                        }
                         let mux = Mux::get();
                         if let Err(err) = mux.focus_pane_and_containing_tab(pane_id) {
                             log::error!("Error reconciling PaneFocused notification: {err:#}");

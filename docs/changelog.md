@@ -160,6 +160,13 @@ As features stabilize some brief notes about them will accumulate here.
   `CTRL-u` to kill back to the start of the line. Thanks to @bew! #8013
 
 #### Fixed
+* GUI could stop responding (100% of a core, and over a multiplexer connection
+  unbounded memory growth) when the active pane changed twice in quick
+  succession, eg: from a Lua callback that splits and activates panes. The
+  deferred `PaneFocused` reconciliation re-applied the stale focus, which
+  emitted another `PaneFocused`, so two notifications chased each other
+  forever. Only the most recent one is now applied, and the client no longer
+  echoes server-originated focus back to the server. #4390
 * Multiplexer: the mouse wheel was not mapped to cursor up/down keys in the
   alternate screen for panes in a `wezterm connect` domain, because the client
   always reported the alternate screen as inactive. The server now advises the

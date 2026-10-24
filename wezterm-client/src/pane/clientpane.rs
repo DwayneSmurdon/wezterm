@@ -229,6 +229,17 @@ impl ClientPane {
                 // it here.
                 log::trace!("advised of remote pane focus: {pane_id}");
 
+                // The server already has this pane focused: record that, so
+                // that applying it locally (which calls our focus_changed and
+                // so advise_focus) doesn't send it straight back. Otherwise a
+                // stale echo of an earlier focus change can bounce between
+                // client and server indefinitely.
+                self.client
+                    .focused_remote_pane_id
+                    .lock()
+                    .unwrap()
+                    .replace(self.remote_pane_id);
+
                 let mux = Mux::get();
                 if let Err(err) = mux.focus_pane_and_containing_tab(self.local_pane_id) {
                     log::error!("Error reconciling remote PaneFocused notification: {err:#}");
