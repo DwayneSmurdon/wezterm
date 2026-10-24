@@ -448,6 +448,9 @@ struct SplitPane {
     top_level: bool,
     #[dynamic(default = "default_split_size")]
     size: f32,
+    /// Move this existing pane into the split instead of spawning a new program
+    #[dynamic(default)]
+    move_pane_id: Option<PaneId>,
 }
 impl_lua_conversion_dynamic!(SplitPane);
 
@@ -457,10 +460,36 @@ fn default_split_size() -> f32 {
 
 impl SplitPane {
     async fn run(&self, pane: &MuxPane) -> mlua::Result<MuxPane> {
-        let (command, command_dir) = self.cmd_builder.to_command_builder();
-        let source = SplitSource::Spawn {
-            command,
-            command_dir,
+        let mux = get_mux()?;
+        let source = match self.move_pane_id {
+            Some(move_pane_id) => {
+                // The split removes the moved pane from its tab before it
+                // looks up the target, so moving a pane next to itself
+                // would orphan it.
+                if move_pane_id == pane.0 {
+                    return Err(mlua::Error::external(format!(
+                        "cannot move pane {} next to itself",
+                        move_pane_id
+                    )));
+                }
+                let target_domain = pane.resolve(&mux)?.domain_id();
+                let moved_domain = MuxPane(move_pane_id).resolve(&mux)?.domain_id();
+                if moved_domain != target_domain {
+                    return Err(mlua::Error::external(format!(
+                        "cannot move pane {} into a split of pane {}: \
+                         they belong to different domains",
+                        move_pane_id, pane.0
+                    )));
+                }
+                SplitSource::MovePane(move_pane_id)
+            }
+            None => {
+                let (command, command_dir) = self.cmd_builder.to_command_builder();
+                SplitSource::Spawn {
+                    command,
+                    command_dir,
+                }
+            }
         };
 
         let size = if self.size == 0.0 {
@@ -486,7 +515,6 @@ impl SplitPane {
             size,
         };
 
-        let mux = get_mux()?;
         let (pane, _size) = mux
             .split_pane(pane.0, request, source, self.domain.clone())
             .await

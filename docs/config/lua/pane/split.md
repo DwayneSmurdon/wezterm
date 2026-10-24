@@ -104,3 +104,27 @@ pane:split { direction = 'Top', size = 0.333 }
 pane:split { direction = 'Top', size = 0.5 }
 ```
 
+### move_pane_id
+
+{{since('nightly')}}
+
+Instead of spawning a new program, move the existing pane with this id into
+the split. The pane keeps running; it is removed from the tab that contained
+it, and that tab is closed if it becomes empty. This is the Lua equivalent of
+`wezterm cli split-pane --move-pane-id`, and can be used to move a pane into
+a different tab or window.
+
+`args`, `cwd` and `set_environment_variables` are ignored when `move_pane_id`
+is set. The moved pane must belong to the same domain as `pane`, and cannot
+be `pane` itself.
+
+This moves `other_pane` to the right of `pane`, even when the two are in
+different tabs:
+
+```lua
+pane:split { direction = 'Right', move_pane_id = other_pane:pane_id() }
+```
+
+See also [pane:move_to_new_tab()](move_to_new_tab.md) and
+[pane:move_to_new_window()](move_to_new_window.md).
+
